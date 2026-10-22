@@ -70,6 +70,19 @@ jobs:
              --basetemp="${GITHUB_WORKSPACE}/pytest-tmp" \
              --junitxml="${GITHUB_WORKSPACE}/ci-logs/junit_02_test_suite.xml"
 
+    - name: DEBUG annotate failures
+      if: failure()
+      run: |
+           python3 - <<'PYEOF'
+           import xml.etree.ElementTree as ET, os
+           t = ET.parse(os.environ['GITHUB_WORKSPACE']+'/ci-logs/junit_02_test_suite.xml')
+           for tc in t.iter('testcase'):
+               for f in list(tc.findall('failure'))+list(tc.findall('error')):
+                   txt = ( (f.get('message') or '') + '\n' + (f.text or '') )[-6000:]
+                   txt = txt.replace('%','%25').replace('\r','').replace('\n','%0A')
+                   print(f"::error title={tc.get('name')}::{txt}")
+           PYEOF
+
     - name: Test NCrystal linkage
       env:
         SBTEST_REQUIRE: ncrystal numpy
