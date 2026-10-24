@@ -352,7 +352,7 @@ def deinstall_parts(instdir,pkgname,current_parts,disappeared_parts):
                 #mymod.cpython-312-x86_64-linux-gnu.so:
                 rm_file( i / 'python' / pkgname / ( d[6:] + __cache_pyextsuf ) )
             if d.startswith('pymod_'):
-                for f in ( namefct_pymod(None,d,None), d[6:] + '.py', d[6:] + '.pyi' ):
+                for f in ( namefct_pymod(None,d,None), d[6:] + '.py' ):
                     rm_file( i / 'python' / pkgname / f )
             if not pydone:
                 pydone=True

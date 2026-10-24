@@ -1,7 +1,7 @@
 # sbldpy
 
-Simple Python bindings for C++ code, based on ctypes. This directory is
-self-contained:
+Ultra lightweight Python bindings for C++ code, based on ctypes. This
+directory is self-contained:
 
 - `include/sbldpy/sbldpy.hh`: Header-only C++17 library, used to define
   modules (with `SBLDPY_MODULE`).
@@ -15,8 +15,8 @@ exceptions never cross them):
 - `int sbldpy_abi_version()`: Version of the binary interface (must match
   `sbldpy.abi_version` in the runtime).
 - `const char * sbldpy_module_info()`: JSON description of the module
-  (versions, functions, classes, constants, type descriptors, argument names,
-  default values, documentation, and IDs of hidden entries), or NULL on errors.
+  (versions, functions, classes, type descriptors, argument names,
+  documentation, and IDs of hidden entries), or NULL on errors.
 - `int sbldpy_call( int id, void ** args, void * result )`: Calls entry `id`
   of the module, returning an error code (0 on success).
 - `const char * sbldpy_last_error()`: Error message of the last failed call on
@@ -30,5 +30,5 @@ the runtime when it is loaded.
 
 In simplebuild, modules are defined in `pymod_<modulename>` subdirectories of
 packages. The library of a module is installed as `_sbldpy_<modulename>.so`,
-next to a generated `<modulename>.py` file (and `<modulename>.pyi` type stubs).
+next to a generated `<modulename>.py` file.
 See the simplebuild documentation for how to use sbldpy.

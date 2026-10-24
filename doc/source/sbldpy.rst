@@ -19,10 +19,13 @@ library, which is loaded with the `ctypes
 library. This means that the compiled code does not depend on the version of
 Python, and it is in general much faster to compile.
 
-sbldpy deliberately supports only a small set of types, which are always
-handled in the same simple manner. In particular, data is always copied (with
-the exception of arrays, which can be passed as views), and C++ functions can
-not return references or pointers.
+sbldpy is deliberately ultra lightweight, so modules compile quickly. It
+supports only a small set of features and types, which are always handled in
+the same simple manner. In particular, data is always copied (with the
+exception of arrays, which can be passed as views), and C++ functions can not
+return references or pointers. More advanced functionality (e.g. default
+values of arguments, properties, or alternative ways to create objects) can be
+implemented in Python code wrapping the module.
 
 Modules are defined in subdirectories named ``pymod_<modulename>`` of a
 package. The ``pymod_<modulename>`` and ``pycpp_<modulename>`` subdirectories
@@ -57,13 +60,12 @@ Placing the following in the file ``pymod_mymod/mod.cc`` of a package
   SBLDPY_MODULE( mymod )
   {
     m.doc( "My module" );
-    m.def( "add", &add, "Add two numbers", { "a", sbldpy::arg( "b", 1.0 ) } );
+    m.def( "add", &add, "Add two numbers", { "a", "b" } );
     m.def( "greet", &greet, { "name" } );
-    m.add_constant( "answer", 42 );
     m.add_class<Counter>( "Counter", "A counter" )
       .def_init<std::int64_t>( { "start" } )
-      .def( "increment", &Counter::increment, { sbldpy::arg( "n", 1 ) } )
-      .def_property( "value", &Counter::value );
+      .def( "increment", &Counter::increment, { "n" } )
+      .def( "value", &Counter::value );
   }
 
 results in a Python module which can be used as:
@@ -72,19 +74,19 @@ results in a Python module which can be used as:
 
   import MyPkg.mymod
   print( MyPkg.mymod.add( 1, 2 ) )          # 3.0
-  print( MyPkg.mymod.add( 1 ) )             # 2.0
   print( MyPkg.mymod.greet( name = 'you' ) ) # Hello you
   c = MyPkg.mymod.Counter( 10 )
-  c.increment()
-  print( c.value )                          # 11
+  c.increment( n = 1 )
+  print( c.value() )                        # 11
 
 The name given to ``SBLDPY_MODULE`` must match the name of the subdirectory,
 and ``SBLDPY_MODULE`` must be used exactly once per module (the code of a
 module can be spread over several files in the ``pymod_<modulename>``
 directory). The functions, classes, etc. get proper signatures and
-documentation in Python (try for instance ``help(MyPkg.mymod)``), and a
-``.pyi`` file with type stubs is generated for each module. Argument names are
-optional, but without them arguments can only be given positionally.
+documentation in Python (try for instance ``help(MyPkg.mymod)``). Argument
+names are optional, but recommended: they make it possible to pass arguments by
+name in Python, which helps avoiding mistakes. Without them, arguments can only
+be given positionally.
 
 Supported types
 ===============
@@ -106,8 +108,8 @@ types:
    * - ``bool`` (only ``True`` or ``False``)
      - ``bool``
    * - ``str``
-     - ``std::string``, ``std::string_view`` or ``const char*`` (the latter
-       can not contain null characters)
+     - ``std::string`` or ``const char*`` (the latter can not contain null
+       characters)
    * - ``tuple`` (or list) of the above
      - ``std::tuple``, ``std::pair`` or ``std::array``
    * - Array: numpy array, other objects with the buffer protocol, or a list
@@ -118,7 +120,7 @@ types:
    * - Callable
      - ``sbldpy::Callback<R(Args...)>`` (see below)
    * - Object of class defined in the module
-     - ``T&``, ``const T&`` or ``T`` (copy)
+     - ``T&`` or ``const T&``
 
 A ``TypeError`` is raised for values of the wrong type (for instance, a
 ``float`` is not accepted for an integer, and a ``bool`` is not accepted for
@@ -143,10 +145,11 @@ Return values (C++ to Python) can be:
        ``sbldpy::NumpyCopy``
      - ``tuple``
    * - ``sbldpy::NumpyCopy<T>``
-     - New numpy array (copy of the data)
+     - New one-dimensional numpy array (copy of the data)
    * - ``sbldpy::NumpyView<T>`` or ``sbldpy::NumpyView<const T>`` (only
        from methods)
-     - numpy array referring to the data (read-only for ``const T``)
+     - One-dimensional numpy array referring to the data (read-only for
+       ``const T``)
    * - Object of class defined in the module (by value)
      - New object owned by Python
    * - ``void``
@@ -154,9 +157,8 @@ Return values (C++ to Python) can be:
 
 References and pointers can not be returned, and a ``std::vector`` must be
 returned as a ``sbldpy::NumpyCopy`` or ``sbldpy::NumpyView``. The element type
-of numpy arrays can be any fixed width integer type, ``float`` or ``double``,
-and an array can be given a shape with several dimensions, e.g.
-``sbldpy::NumpyCopy<double>( std::move(data), { nrows, ncols } )``. Returning
+of numpy arrays can be any fixed width integer type, ``float`` or ``double``
+(multi-dimensional arrays can be reshaped in Python). Returning
 numpy arrays requires numpy, while numpy is not needed for passing arrays to
 C++ functions.
 
@@ -171,24 +173,19 @@ Classes
 
 Classes are added with ``m.add_class<T>( name, doc )``, and support:
 
-* ``.def_init<Args...>( ... )``: constructor calling ``T(Args...)``, or
-  ``.def_init( factory, ... )`` with a function returning ``T`` by value.
-  Several constructors can be defined, as long as they can be distinguished by
-  the number of arguments.
-* ``.def( name, method, ... )``: method, given as a member function pointer
-  (also of a base class), or as a function or lambda taking ``T&`` or ``const
-  T&`` as first parameter. Methods can also have special names like
+* ``.def_init<Args...>( ... )``: constructor calling ``T(Args...)``. At most
+  one constructor can be defined. Without a constructor, objects can only be
+  created by functions returning them.
+* ``.def( name, method, ... )``: method, given as a member function pointer of
+  ``T`` itself (not of a base class), or as a function or lambda taking ``T&``
+  or ``const T&`` as first parameter. Methods can also have special names like
   ``__repr__``.
 * ``.def_static( name, function, ... )``: static method.
-* ``.def_property( name, getter [, setter], doc )``: property, with getter
-  and setter given as methods or pointers to data members.
-* ``.add_constant( name, value )``: constant.
 
 Objects are owned by Python, and deleted when the Python object is deleted.
 Objects can only be passed to functions of the same module, and the classes
 can not be subclassed in Python. Objects can not be copied or pickled in
-Python. A class without constructors can only be created by functions
-returning it.
+Python.
 
 Callbacks
 =========
@@ -198,7 +195,7 @@ Python callables can be passed to C++ functions taking a
 and stored, and the Python callable is kept alive until the last copy is
 destroyed. Only plain data is passed (and copied): The parameters can be
 integers (of any type up to 64 bits), ``float``, ``double``, ``bool``,
-strings, tuples of those, and ``sbldpy::NumpyCopy`` objects. The return type
+``std::string``, ``const char*``, tuples of those, and ``sbldpy::NumpyCopy`` objects. The return type
 can be ``void``, ``std::int64_t``, ``double``, ``bool``, ``std::string``,
 tuples of those, or ``std::vector`` of ``double``, ``std::int64_t`` or
 ``std::uint8_t``.
@@ -255,5 +252,5 @@ which is ``major*1000000+minor*1000+patch``, e.g. ``1002003`` for version
 version of sbldpy it was built with) is available with
 ``sbldpy.module_info(module)``.
 
-Module names starting with ``_sbld`` are reserved, and can not be used for
+Python module names starting with ``_sbld`` are reserved, and can not be used for
 any Python modules in packages (and a package can not be named ``sbldpy``).

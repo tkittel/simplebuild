@@ -52,23 +52,12 @@ def test_installed_files( proj ):
     i = inst( proj )
     assert ( i / 'python' / 'sbldpy.py' ).is_file()
     assert ( i / 'sbldpy' / 'include' / 'sbldpy' / 'sbldpy.hh' ).is_file()
-    for f in ( '_sbldpy_feat.so', 'feat.py', 'feat.pyi', '__init__.py', 'purepy.py' ):
-        assert ( i / 'python' / 'PkgA' / f ).exists(), f
-    for f in ( '_sbldpy_small.so', 'small.py', 'small.pyi', '__init__.py' ):
-        assert ( i / 'python' / 'PkgB' / f ).exists(), f
+    assert sorted( f.name for f in ( i / 'python' / 'PkgA' ).iterdir() if f.name != '__pycache__' ) \
+        == [ '__init__.py', '_sbldpy_feat.so', 'feat.py', 'purepy.py' ]
+    assert sorted( f.name for f in ( i / 'python' / 'PkgB' ).iterdir() if f.name != '__pycache__' ) \
+        == [ '__init__.py', '_sbldpy_small.so', 'small.py' ]
     stub = ( i / 'python' / 'PkgA' / 'feat.py' ).read_text()
     assert "_sbldpy.load_module( globals(), '_sbldpy_feat' )" in stub
-    pyi = ( i / 'python' / 'PkgA' / 'feat.pyi' ).read_text()
-    for expected in ( 'def add(a: float, b: float = 1.5) -> float:',
-                      'def iadd(arg0: int, arg1: int, /) -> int:',
-                      'def integrate(f: collections.abc.Callable[[float], float], n: int = 1000) -> float:',
-                      'def linspace(arg0: float, arg1: float, arg2: int, /) -> numpy.typing.NDArray[numpy.float32]:',
-                      'class Counter:', '    @typing.overload', '    def increment(self, n: int = 1) -> int:',
-                      '    @property', '    @value.setter', '    @staticmethod',
-                      'pi: float', 'pair: tuple[int, float]' ):
-        assert expected in pyi, expected
-    #The .pyi file is valid Python:
-    compile( pyi, 'feat.pyi', 'exec' )
 
 def test_basic( proj ):
     check( proj, 'basic' )
@@ -165,50 +154,56 @@ def test_build_errors( tmp_path ):
                    'std::vector can not be returned directly' )
     _build_errors( d, { 'PkgA/pymod_x/mod.cc' : _mod%('x','m.def("f",[](){ static double x; return &x; });') },
                    'pointers can not be returned' )
-    #Errors detected when the module is loaded at build time:
-    _build_errors( d, { 'PkgA/pymod_x/mod.cc' : _mod%('x','m.def("f",[](std::int64_t){},{sbldpy::arg("a","notanint")});') },
-                   'Invalid default value of argument "a" of f: expected int, got str' )
-    _build_errors( d, { 'PkgA/pymod_x/mod.cc' : _mod%('x','m.def("f",[](std::int64_t){},{"a","b"});') },
-                   'wrong number of argument names given for f' )
-    _build_errors( d, { 'PkgA/pymod_x/mod.cc' : _mod%('x','m.def("f",[](){});m.def("f",[](){});') },
-                   'Duplicate name in module PkgA.x: f' )
-    _build_errors( d, { 'PkgA/pymod_x/mod.cc' : ( '#include "sbldpy/sbldpy.hh"\nstruct S{ S(std::int64_t){} };\n'
-                                                  'SBLDPY_MODULE( x ) { m.add_class<S>("S").def_init<std::int64_t>()'
-                                                  '.def_init([](std::int64_t a){ return S(a); }); }\n' ) },
-                   'Constructors of class S can not be distinguished by their number of arguments' )
-    _build_errors( d, { 'PkgA/pymod_x/mod.cc' : ( '#include "sbldpy/sbldpy.hh"\nstruct S{};\n'
-                                                  'SBLDPY_MODULE( x ) { m.def("f",[](const S&){}); }\n' ) },
-                   'a class which was not (yet) added to the module with add_class' )
+    _build_errors( d, { 'PkgA/pymod_x/mod.cc' : _mod%('x','m.def("f",[](std::string_view){});') },
+                   'std::string_view is not supported (use std::string or const char*)' )
+    _build_errors( d, { 'PkgA/pymod_x/mod.cc' : ( '#include "sbldpy/sbldpy.hh"\nstruct B{ int f() const { return 1; } };\n'
+                                                  'struct D : B {};\n'
+                                                  'SBLDPY_MODULE( x ) { m.add_class<D>("D").def("f",&D::f); }\n' ) },
+                   'methods must be member functions of the class itself' )
 
-def test_deinstall_and_typestubs_switch( tmp_path ):
+def _import_error( d, files, expected_msg ):
+    write_files( d, files )
+    run( 'sb', d )
+    res = run( [ 'sbenv', sys.executable, '-c', 'import PkgA.x' ], d, expect_ec = None )
+    assert res.ec != 0
+    assert expected_msg in res.out, res.out
+    for f in files:
+        p = d / f
+        p.unlink()
+        if not any( p.parent.iterdir() ):
+            p.parent.rmdir()
+
+def test_import_errors( tmp_path ):
+    #Errors in the module definition detected when the module is loaded:
+    d = tmp_path / 'proj'
+    write_files( d, _files )
+    _mod = '#include "sbldpy/sbldpy.hh"\nSBLDPY_MODULE( x ) {\n%s\n}\n'
+    _import_error( d, { 'PkgA/pymod_x/mod.cc' : _mod%'m.def("f",[](std::int64_t){},{"a","b"});' },
+                   'wrong number of argument names given for f' )
+    _import_error( d, { 'PkgA/pymod_x/mod.cc' : _mod%'m.def("f",[](){});m.def("f",[](){});' },
+                   'Duplicate name in module PkgA.x: f' )
+    _import_error( d, { 'PkgA/pymod_x/mod.cc' : _mod%'m.def("f",[](std::int64_t){},{"class"});' },
+                   "Invalid argument name: 'class'" )
+    _import_error( d, { 'PkgA/pymod_x/mod.cc' : ( '#include "sbldpy/sbldpy.hh"\nstruct S{ S(std::int64_t){} };\n'
+                                                  'SBLDPY_MODULE( x ) { m.add_class<S>("S").def_init<std::int64_t>()'
+                                                  '.def_init<std::int64_t>(); }\n' ) },
+                   'only one constructor can be defined for class S' )
+    _import_error( d, { 'PkgA/pymod_x/mod.cc' : ( '#include "sbldpy/sbldpy.hh"\nstruct S{};\n'
+                                                  'SBLDPY_MODULE( x ) { m.def("f",[](const S&){}); }\n' ) },
+                   'was not added to the module with add_class' )
+
+def test_deinstall( tmp_path ):
     d = tmp_path / 'proj'
     write_files( d, _files )
     run( 'sb', d )
     pydir = inst( d ) / 'python' / 'PkgB'
-    assert ( pydir / 'small.pyi' ).is_file()
-    #The type stubs (and loading of the module at build time) can be disabled
-    #with an undocumented environment variable, which takes effect when the
-    #module is rebuilt:
-    src = d / 'PkgB' / 'pymod_small' / 'mod.cc'
-    src.write_text( src.read_text() + '//changed\n' )
-    run( 'sb', d, env_extra = { 'SIMPLEBUILD_SBLDPY_TYPESTUBS' : '0' } )
-    assert ( pydir / 'small.py' ).is_file() and not ( pydir / 'small.pyi' ).exists()
-    #Can be used to work around problems when loading modules at build time:
-    src.write_text( src.read_text().replace( 'm.def(', 'm.def( "dup", [](){} ); m.def( "dup", [](){} ); m.def(' ) )
-    res = run( 'sb', d, expect_ec = None )
-    assert res.ec != 0 and 'Duplicate name in module PkgB.small: dup' in res.out
-    run( 'sb', d, env_extra = { 'SIMPLEBUILD_SBLDPY_TYPESTUBS' : 'off' } )
-    assert not ( pydir / 'small.pyi' ).exists()
-    src.write_text( src.read_text().replace( 'm.def( "dup", [](){} ); m.def( "dup", [](){} ); ', '' ) )
-    run( 'sb', d )
-    assert ( pydir / 'small.pyi' ).is_file()
+    assert ( pydir / 'small.py' ).is_file()
     assert run( 'sbenv python3 -c "import PkgB.small;print(PkgB.small.value())"', d ).stdout.strip() == '1'
     #Removing a module removes all its installed files:
     shutil.rmtree( d / 'PkgB' / 'pymod_small' )
-    res = run( 'sb', d )
+    run( 'sb', d )
     assert not pydir.exists()
     ( d / 'PkgB' / 'python' ).mkdir()
     ( d / 'PkgB' / 'python' / 'other.py' ).write_text( '' )
-    res = run( 'sb', d )
+    run( 'sb', d )
     assert sorted( f.name for f in pydir.iterdir() ) == [ '__init__.py', 'other.py' ]
-    del res

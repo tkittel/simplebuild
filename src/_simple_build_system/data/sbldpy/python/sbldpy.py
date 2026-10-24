@@ -2,7 +2,7 @@
 
 This is the pure-Python runtime of sbldpy. It loads the shared libraries of
 modules defined in C++ with the header-only library sbldpy/sbldpy.hh, and
-provides the functions, classes and constants defined in them. The libraries
+provides the functions and classes defined in them. The libraries
 are not linked with libpython and do not use the Python C-API at all: they
 only export the plain C functions sbldpy_abi_version, sbldpy_module_info,
 sbldpy_call and sbldpy_last_error.
@@ -42,10 +42,6 @@ class _StrRes( _ct.Structure ):
 
 class _ArrArg( _ct.Structure ):
     _fields_ = [ ( 'data', _ct.c_void_p ), ( 'size', _ct.c_int64 ) ]
-
-class _ArrRes( _ct.Structure ):
-    _fields_ = [ ( 'data', _ct.c_void_p ), ( 'size', _ct.c_int64 ),
-                 ( 'ndim', _ct.c_int64 ), ( 'shape', _ct.POINTER( _ct.c_int64 ) ) ]
 
 class _AssignRes( _ct.Structure ):
     _fields_ = [ ( 'dest', _ct.c_void_p ), ( 'assign', _ct.c_void_p ) ]
@@ -111,8 +107,6 @@ def _to_f64( v ):
 def _to_bool( v ):
     if v is True or v is False:
         return v
-    if _is_numpy_bool( v ):
-        return bool( v )
     raise TypeError( 'expected bool, got %s'%_typename( v ) )
 
 def _to_str( v ):
@@ -351,16 +345,15 @@ def _make_read_arr( dt, is_view, readonly ):
     ctype, npname, _ = _dtypes[dt]
     def read( addr, owner ):
         np = _numpy( 'returning numpy arrays' )
-        a = _ArrRes.from_address( addr )
-        shape = tuple( a.shape[i] for i in range( a.ndim ) )
+        a = _ArrArg.from_address( addr )
         if a.size == 0 or not a.data:
-            res = np.zeros( shape, dtype = npname )
+            res = np.zeros( a.size, dtype = npname )
         elif is_view:
             buf = ( ctype * a.size ).from_address( a.data )
             buf._sbldpy_owner = owner#keep the Python object alive
-            res = np.frombuffer( buf, dtype = npname ).reshape( shape )
+            res = np.frombuffer( buf, dtype = npname )
         else:
-            res = np.empty( shape, dtype = npname )
+            res = np.empty( a.size, dtype = npname )
             _ct.memmove( res.ctypes.data, a.data, a.size * _ct.sizeof( ctype ) )
         if readonly:
             res.flags.writeable = False
@@ -385,7 +378,7 @@ def _make_ret( d, classes, allow = ( 'obj', 'view' ) ):
     if k == 'copy' or ( k == 'view' and 'view' in allow ):
         if d['dt'] not in _dtypes:
             raise ImportError( 'unsupported array type: %r'%( d, ) )
-        return _Ret( _ArrRes, _make_read_arr( d['dt'], k == 'view', d.get( 'ro', False ) ) )
+        return _Ret( _ArrArg, _make_read_arr( d['dt'], k == 'view', d.get( 'ro', False ) ) )
     if k == 'tuple':
         items = [ _make_ret( e, classes, allow = () ) for e in d['items'] ]
         n = len( items )
@@ -537,15 +530,8 @@ def _wrap_object( cls, ptr ):
     return o
 
 ################################################################################
-# Creating functions, classes and constants                                    #
+# Creating functions and classes                                              #
 ################################################################################
-
-def _decode_value( v ):
-    if isinstance( v, dict ):
-        return float.fromhex( v['f'] )
-    if isinstance( v, list ):
-        return tuple( _decode_value( e ) for e in v )
-    return v
 
 def _check_name( name, what ):
     import keyword
@@ -555,13 +541,13 @@ def _check_name( name, what ):
         raise ImportError( 'Invalid %s name (names starting with "_sbld" are reserved): %r'%( what, name ) )
 
 class _Annot:
-    """Type annotation shown in help (and used in .pyi files)"""
+    """Type annotation shown in help"""
     def __init__( self, s ):
         self.s = s
     def __repr__( self ):
         return self.s
 
-_pyi_dtypes = dict( ( k, 'numpy.typing.NDArray[numpy.%s]'%v[1] ) for k, v in _dtypes.items() )
+_annot_dtypes = dict( ( k, 'numpy.typing.NDArray[numpy.%s]'%v[1] ) for k, v in _dtypes.items() )
 
 def _typestr( d, mode ):
     """Python type of parameters (mode='param') or return values (mode='ret')
@@ -581,7 +567,7 @@ def _typestr( d, mode ):
         return ( 'bytes | bytearray | memoryview | numpy.typing.ArrayLike'
                  if d['dt'] == 'u8' else 'numpy.typing.ArrayLike' )
     if k in ( 'copy', 'view' ):
-        return _pyi_dtypes[d['dt']]
+        return _annot_dtypes[d['dt']]
     if k == 'tuple':
         return 'tuple[%s]'%', '.join( _typestr( e, mode ) for e in d['items'] )
     if k == 'obj':
@@ -601,34 +587,21 @@ class _FuncSpec:
         self.params = fi['params']
         self.ret = fi['ret']
         names = fi.get( 'argnames' )
+        #Without argument names, arguments are positional only:
         self.positional_only = names is None
         if names is None:
-            names = [ { 'name' : 'arg%i'%i } for i in range( len( self.params ) ) ]
+            names = [ 'arg%i'%i for i in range( len( self.params ) ) ]
         if len( names ) != len( self.params ):
             raise ImportError( 'Inconsistent argument names of %s'%self.name )
-        self.argnames = [ a['name'] for a in names ]
+        self.argnames = names
         for a in self.argnames:
             _check_name( a, 'argument' )
         if len( set( self.argnames ) ) != len( self.argnames ) or ( nself and 'self' in self.argnames ):
             raise ImportError( 'Duplicate argument names of %s'%self.name )
         self.convs = [ _make_conv( p, classes ) for p in self.params ]
-        self.defaults = []
-        for a, c in zip( names, self.convs ):
-            if 'default' in a:
-                v = _decode_value( a['default'] )
-                try:
-                    c( v )
-                except Exception as e:
-                    raise ImportError( 'Invalid default value of argument "%s" of %s: %s'%( a['name'],
-                                                                                          self.name, e ) )
-                self.defaults.append( v )
-        self.nrequired = len( self.params ) - len( self.defaults )
 
     def signature_src( self, with_self ):
-        parts = [ 'self' ] if with_self else []
-        nd = len( self.argnames ) - len( self.defaults )
-        for i, a in enumerate( self.argnames ):
-            parts.append( a if i < nd else '%s=_sbld_d%i'%( a, i - nd ) )
+        parts = ( [ 'self' ] if with_self else [] ) + self.argnames
         if self.positional_only and self.argnames:
             parts.append( '/' )
         return ', '.join( parts )
@@ -650,8 +623,6 @@ def _make_function( spec, caller, modname, qualname, with_self, body = None, ext
                                        spec.signature_src( with_self ), body )
     ns = { '_sbld_call' : caller }
     ns.update( extra_ns or {} )
-    for i, d in enumerate( spec.defaults ):
-        ns['_sbld_d%i'%i] = d
     exec( src, ns )
     f = ns[ spec.name if spec.name.isidentifier() else 'f' ]
     f.__name__ = spec.name
@@ -679,44 +650,22 @@ def _make_class( lib, ci, classes, modname ):
             _dtor( ( p, ) )
     cls.__del__ = __del__
 
-    #Constructors (selected by the number of arguments):
-    inits = [ _FuncSpec( fi, classes ) for fi in ci['inits'] ]
-    initfcts = []
-    for spec in inits:
-        #Constructors return a pointer to the new object:
+    #Constructor (returns a pointer to the new object):
+    if ci['init'] is None:
+        def __init__( self, *args, **kwargs ):
+            raise TypeError( '%s objects can not be created directly'%name )
+        __init__.__qualname__ = name + '.__init__'
+    else:
+        spec = _FuncSpec( ci['init'], classes )
         ccall = _make_caller( lib, spec.id, spec.convs,
                               _Ret( _ct.c_void_p, None, lambda obj, owner : obj.value ) )
         body = ( 'p = _sbld_call( ( %s ) )\n'
                  '    _sbld_set( self, p )'%( ', '.join( spec.argnames ) + ',' if spec.argnames else '' ) )
-        f = _make_function( spec, ccall, modname, name + '.__init__', True, body = body,
-                            extra_ns = { '_sbld_set' : _set_ptr } )
-        f.__annotations__['return'] = _Annot( 'None' )
-        initfcts.append( ( spec, f ) )
-    ranges = sorted( ( s.nrequired, len( s.params ) ) for s in inits )
-    for ( a0, a1 ), ( b0, b1 ) in zip( ranges, ranges[1:] ):
-        if b0 <= a1:
-            raise ImportError( 'Constructors of class %s can not be distinguished by their number of'
-                               ' arguments'%name )
-    if not initfcts:
-        def __init__( self, *args, **kwargs ):
-            raise TypeError( '%s objects can not be created directly'%name )
-        __init__.__qualname__ = name + '.__init__'
-    elif len( initfcts ) == 1:
-        __init__ = initfcts[0][1]
-    else:
-        def __init__( self, *args, **kwargs ):
-            n = len( args ) + len( kwargs )
-            for spec, f in initfcts:
-                if spec.nrequired <= n <= len( spec.params ):
-                    return f( self, *args, **kwargs )
-            raise TypeError( '%s() takes %s arguments (%i given)'%(
-                name, ' or '.join( str( len( s.params ) ) for s, _ in initfcts ), n ) )
-        __init__.__qualname__ = name + '.__init__'
-        __init__.__doc__ = '\n'.join( '%s(%s)%s'%( name, s.signature_src( False ).replace( '_sbld_d', 'default' ),
-                                                   ': ' + s.doc if s.doc else '' ) for s, _ in initfcts )
+        __init__ = _make_function( spec, ccall, modname, name + '.__init__', True, body = body,
+                                   extra_ns = { '_sbld_set' : _set_ptr } )
+        __init__.__annotations__['return'] = _Annot( 'None' )
     __init__.__module__ = modname
     cls.__init__ = __init__
-    cls._sbldpy_inits = [ s for s, _ in initfcts ]
 
     for fi in ci['methods']:
         spec = _FuncSpec( fi, classes, nself = 1 )
@@ -730,22 +679,6 @@ def _make_class( lib, ci, classes, modname ):
         caller = _make_caller( lib, spec.id, spec.convs, _make_ret( spec.ret, classes, allow = ( 'obj', ) ) )
         setattr( cls, spec.name, staticmethod( _make_function( spec, caller, modname,
                                                                 '%s.%s'%( name, spec.name ), False ) ) )
-    for pi in ci['properties']:
-        _check_name( pi['name'], 'property' )
-        selfconv = _make_conv( { 'k' : 'obj', 'cls' : name }, classes )
-        getter = _make_caller( lib, pi['get'], [ selfconv ], _make_ret( pi['type'], classes ) )
-        def fget( self, _getter = getter ):
-            return _getter( ( self, ), self )
-        fset = None
-        if pi['set'] >= 0:
-            setter = _make_caller( lib, pi['set'], [ selfconv, _make_conv( pi['settype'], classes ) ],
-                                   _make_ret( 'none', classes ) )
-            def fset( self, value, _setter = setter ):
-                _setter( ( self, value ) )
-        setattr( cls, pi['name'], property( fget, fset, doc = pi.get( 'doc' ) or None ) )
-    for c in ci['constants']:
-        _check_name( c['name'], 'constant' )
-        setattr( cls, c['name'], _decode_value( c['value'] ) )
     return cls
 
 def _set_ptr( self, p ):
@@ -795,11 +728,6 @@ class _Module:
                 raise ImportError( 'Duplicate name in module %s: %s'%( modname, spec.name ) )
             caller = _make_caller( lib, spec.id, spec.convs, _make_ret( spec.ret, classes, allow = ( 'obj', ) ) )
             ns[spec.name] = _make_function( spec, caller, modname, spec.name, False )
-        for c in info['constants']:
-            _check_name( c['name'], 'constant' )
-            if c['name'] in ns:
-                raise ImportError( 'Duplicate name in module %s: %s'%( modname, c['name'] ) )
-            ns[c['name']] = _decode_value( c['value'] )
         self.namespace = ns
         init = _make_caller( lib, hidden['init_runtime'], [ _ct.c_void_p, _ct.c_void_p ],
                              _make_ret( 'none', {} ) )
@@ -852,131 +780,3 @@ def module_info( mod ):
     if m is None:
         raise ValueError( 'Not a loaded sbldpy module: %r'%( mod, ) )
     return copy.deepcopy( m.info )
-
-################################################################################
-# Generation of module files and type stubs                                   #
-################################################################################
-
-def stub_module_src( modname ):
-    """Contents of the Python file of a module"""
-    _check_name( modname, 'module' )
-    return ( '# Python module %s, provided by the library _sbldpy_%s.so (autogenerated by sbldpy)\n'
-             'import sbldpy as _sbldpy\n'
-             '_sbldpy.load_module( globals(), \'_sbldpy_%s\' )\n' )%( modname, modname, modname )
-
-def _pyi_value( v ):
-    if isinstance( v, float ) and not ( v == v and abs( v ) != float( 'inf' ) ):
-        return '...'
-    return repr( v )
-
-def _pyi_sig( spec, with_self, retstr = None ):
-    parts = [ 'self' ] if with_self else []
-    nd = len( spec.argnames ) - len( spec.defaults )
-    for i, ( a, p ) in enumerate( zip( spec.argnames, spec.params ) ):
-        s = '%s: %s'%( a, _typestr( p, 'param' ) )
-        if i >= nd:
-            s += ' = %s'%_pyi_value( spec.defaults[i - nd] )
-        parts.append( s )
-    if spec.positional_only and spec.argnames:
-        parts.append( '/' )
-    return '(%s) -> %s'%( ', '.join( parts ), retstr or _typestr( spec.ret, 'ret' ) )
-
-def pyi_src( m ):
-    """Contents of .pyi type stub file for the loaded module"""
-    info = m.info
-    out = [ '# Type stubs for module %s (autogenerated by sbldpy)'%m.modname,
-            'import collections.abc', 'import numpy', 'import numpy.typing', '' ]
-    def doc( indent, d ):
-        if d:
-            out.append( '%s"""%s"""'%( indent, d.replace( '\\', '\\\\' ).replace( '"""', '\\"\\"\\"' ) ) )
-    def constline( indent, c ):
-        v = _decode_value( c['value'] )
-        out.append( '%s%s: %s'%( indent, c['name'], type( v ).__name__ if not isinstance( v, tuple )
-                                 else 'tuple[%s]'%', '.join( type( e ).__name__ for e in v ) ) )
-    for c in info['constants']:
-        constline( '', c )
-    for fi in info['functions']:
-        spec = _FuncSpec( fi, m.classes_for_pyi )
-        out.append( 'def %s%s:'%( spec.name, _pyi_sig( spec, False ) ) )
-        doc( '    ', spec.doc )
-        out.append( '    ...' )
-    for ci in info['classes']:
-        out += [ '', 'class %s:'%ci['name'] ]
-        doc( '    ', ci.get( 'doc' ) )
-        for c in ci['constants']:
-            constline( '    ', c )
-        inits = [ _FuncSpec( fi, m.classes_for_pyi ) for fi in ci['inits'] ]
-        for spec in inits:
-            if len( inits ) > 1:
-                out.append( '    @typing.overload' )
-            out.append( '    def __init__%s:'%_pyi_sig( spec, True, 'None' ) )
-            doc( '        ', spec.doc )
-            out.append( '        ...' )
-        for fi in ci['methods']:
-            spec = _FuncSpec( fi, m.classes_for_pyi, nself = 1 )
-            out.append( '    def %s%s:'%( spec.name, _pyi_sig( spec, True ) ) )
-            doc( '        ', spec.doc )
-            out.append( '        ...' )
-        for fi in ci['staticmethods']:
-            spec = _FuncSpec( fi, m.classes_for_pyi )
-            out += [ '    @staticmethod', '    def %s%s:'%( spec.name, _pyi_sig( spec, False ) ) ]
-            doc( '        ', spec.doc )
-            out.append( '        ...' )
-        for pi in ci['properties']:
-            out += [ '    @property', '    def %s(self) -> %s:'%( pi['name'], _typestr( pi['type'], 'ret' ) ) ]
-            doc( '        ', pi.get( 'doc' ) )
-            out.append( '        ...' )
-            if pi['set'] >= 0:
-                out += [ '    @%s.setter'%pi['name'],
-                         '    def %s(self, value: %s) -> None: ...'%( pi['name'],
-                                                                     _typestr( pi['settype'], 'param' ) ) ]
-        out.append( '    ...' )
-    if any( len( ci['inits'] ) > 1 for ci in info['classes'] ):
-        out.insert( 1, 'import typing' )
-    return '\n'.join( out ) + '\n'
-
-def _write_if_changed( path, content ):
-    import os
-    try:
-        with open( path ) as fh:
-            if fh.read() == content:
-                return
-    except (OSError, UnicodeDecodeError):
-        pass
-    tmp = '%s.tmp%i'%( path, os.getpid() )
-    with open( tmp, 'w' ) as fh:
-        fh.write( content )
-    os.replace( tmp, path )
-
-def main( argv ):
-    """Command line interface used by build systems:
-
-    sbldpy.py install <libpath> <modname> <pyfile> [<pyifile>]
-
-    Writes the Python file of the module and, if <pyifile> is given, loads the
-    module library (which checks the definition of the module) and writes the
-    type stubs.
-    """
-    import sys
-    if len( argv ) not in ( 4, 5 ) or argv[0] != 'install':
-        print( main.__doc__ )
-        return 1
-    libpath, modname, pyfile = argv[1:4]
-    pyifile = argv[4] if len( argv ) == 5 else None
-    try:
-        if pyifile:
-            m = _Module( libpath, modname )
-            m.classes_for_pyi = dict( ( c['name'], [ None ] ) for c in m.info['classes'] )
-            pyi = pyi_src( m )
-        content = stub_module_src( modname.rsplit( '.', 1 )[-1] )
-    except ImportError as e:
-        print( 'ERROR: %s'%e, file = sys.stderr )
-        return 1
-    _write_if_changed( pyfile, content )
-    if pyifile:
-        _write_if_changed( pyifile, pyi )
-    return 0
-
-if __name__ == '__main__':
-    import sys
-    sys.exit( main( sys.argv[1:] ) )

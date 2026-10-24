@@ -22,7 +22,8 @@ def expect( exc, fct, *args, match = None, **kwargs ):
 def check_basic():
     assert feat.__doc__ == 'Module for testing sbldpy'
     assert feat.__all__ == sorted( feat.__all__ ) and 'add' in feat.__all__
-    assert feat.add( 1, 2 ) == 3.0 and feat.add( 1 ) == 2.5 and feat.add( b = 3, a = 1 ) == 4.0
+    assert feat.add( 1, 2 ) == 3.0 and feat.add( b = 3, a = 1 ) == 4.0
+    expect( TypeError, feat.add, 1 )
     assert type( feat.add( 1, 2 ) ) is float
     assert feat.iadd( 2**62, 2**62 - 1 ) == 2**63 - 1
     assert feat.iadd( -2**63, 0 ) == -2**63
@@ -45,13 +46,12 @@ def check_basic():
     expect( TypeError, feat.negate, None )
     assert feat.nothing() is None
     assert feat.greet( 'wørld' ) == 'Hello wørld' and feat.greet( name = '' ) == 'Hello '
-    assert feat.clen( 'abc' ) == 3 and feat.svlen( 'a\0b' ) == 3 and feat.strvalue( 'a\0b' ) == 'a\0b'
-    assert feat.strvalue() == 'dé\nf"ault'
+    assert feat.clen( 'abc' ) == 3 and feat.strvalue( 'a\0b' ) == 'a\0b' and feat.strvalue( 'dé' ) == 'dé'
     expect( ValueError, feat.clen, 'a\0b' )
     expect( TypeError, feat.greet, b'x' )
     assert feat.tup( ( 1, 2, 3 ) ) == ( 3, 'abc', ( 6.0, True ) )
     assert feat.tup( [ 1, 2, 3.5 ] ) == ( 3, 'abc', ( 6.5, True ) )
-    assert feat.tup() == ( 3, 'abc', ( 2.5, True ) )
+    assert feat.tup( a = ( 1, 1, 0.5 ) ) == ( 3, 'abc', ( 2.5, True ) )
     expect( TypeError, feat.tup, ( 1, 2 ) )
     expect( TypeError, feat.tup, 'abc' )
     assert feat.tupin( ( 5, 'x', ( False, 1 ) ) ) == '5xF'
@@ -63,9 +63,6 @@ def check_basic():
                              'unknown C++ exception', 'runtime problem' )[i]
     assert feat.square( 3 ) == 9.0
     assert feat.a_value() == 17
-    assert feat.pi == 3.141592653589793 and feat.inf == float( 'inf' )
-    assert feat.answer == 42 and feat.bignumber == 2**64 - 1 and feat.name == 'sbldpy'
-    assert feat.flag is True and feat.pair == ( 1, 2.5 )
     assert feat.sbldpy_version() == sbldpy.version_int
     assert feat.sbldpy_version_str() == sbldpy.__version__
     v = [ int( e ) for e in sbldpy.__version__.split( '.' ) ]
@@ -77,7 +74,7 @@ def check_basic():
     expect( ValueError, sbldpy.module_info, 'PkgA.nonexisting' )
     #Signatures and documentation:
     import inspect
-    assert str( inspect.signature( feat.add ) ) == '(a: float, b: float = 1.5) -> float'
+    assert str( inspect.signature( feat.add ) ) == '(a: float, b: float) -> float'
     assert str( inspect.signature( feat.iadd ) ) == '(arg0: int, arg1: int, /) -> int'
     assert feat.add.__doc__ == 'Add two numbers' and feat.add.__module__ == 'PkgA.feat'
     assert feat.a_value.__doc__ == 'Value from the package library'
@@ -117,12 +114,12 @@ def check_numpy():
     assert feat.bsum( np.array( [ 1, 2 ], dtype = np.uint8 ) ) == 3
     expect( TypeError, feat.bsum, np.array( [ 1, 2 ], dtype = np.int8 ) )
     assert feat.iadd( np.int32( 5 ), np.int64( 6 ) ) == 11 and feat.add( np.float32( 0.5 ), np.int64( 1 ) ) == 1.5
-    assert feat.negate( np.bool_( False ) ) is True
+    expect( TypeError, feat.negate, np.bool_( False ) )
     expect( TypeError, feat.iadd, np.bool_( True ), 1 )
     a = feat.linspace( 0, 1, 5 )
     assert a.dtype == np.float32 and a.flags.writeable and list( a ) == [ 0, 0.25, 0.5, 0.75, 1.0 ]
-    m = feat.matrix()
-    assert m.dtype == np.int32 and m.shape == ( 2, 3 ) and m[1, 2] == 6
+    m = feat.ints()
+    assert m.dtype == np.int32 and m.shape == ( 3, ) and list( m ) == [ 1, 2, 3 ]
     b = feat.rawbytes()
     assert b.dtype == np.uint8 and b.tobytes() == b'\x00\x01\xff'
     e = feat.empty()
@@ -133,7 +130,7 @@ def check_numpy():
     #Views keep the owner alive:
     c = feat.Counter( 3 )
     c.record()
-    c.increment()
+    c.increment( 1 )
     c.record()
     h = c.history()
     assert list( h ) == [ 3.0, 4.0 ] and not h.flags.writeable
@@ -151,23 +148,22 @@ def check_numpy():
 
 def check_classes():
     c = feat.Counter( 5 )
-    assert repr( c ) == 'Counter(5)' and c.increment() == 6 and c.increment( 10 ) == 16 and c.value == 16
-    c.value = 3
-    assert c.value == 3 and c.label == 'counter' and feat.Counter.MAX == 1000
-    expect( AttributeError, setattr, c, 'label', 'x' )
-    c.label_rw = 'new'
-    assert c.label == 'new' and c.label_rw == 'new'
-    expect( TypeError, setattr, c, 'value', 'x' )
-    assert feat.Counter().value == 0 and feat.Counter( 1, 2 ).value == 3 and feat.Counter( 1, 2, c = 3 ).value == 6
-    expect( TypeError, feat.Counter, 1, 2, 3, 4, match = 'takes 1 or 0 or 3 arguments' )
+    assert repr( c ) == 'Counter(5)' and c.increment( 1 ) == 6 and c.increment( n = 10 ) == 16
+    assert c.value() == 16
+    c.set_value( v = 3 )
+    assert c.value() == 3
+    expect( TypeError, c.set_value, 'x' )
+    expect( TypeError, c.increment )
+    assert feat.Counter( start = 2 ).value() == 2
+    expect( TypeError, feat.Counter )
+    expect( TypeError, feat.Counter, 1, 2 )
     assert feat.Counter.increment.__doc__ == 'Increment'
     assert feat.Counter.__doc__ == 'A counter' and feat.Counter.__module__ == 'PkgA.feat'
-    assert repr( feat.make_counter( 4 ) ) == 'Counter(40)' and repr( feat.Counter.make( 2 ) ) == 'Counter(20)'
+    assert repr( feat.make_counter( 4 ) ) == 'Counter(40)' and repr( feat.Counter.make( v = 2 ) ) == 'Counter(20)'
     assert feat.counter_value( feat.Counter( 7 ) ) == 7
     c = feat.Counter( 1 )
     feat.counter_bump( c )
-    assert c.value == 2
-    assert feat.counter_copy_value( c ) == 1002 and c.value == 2
+    assert c.value() == 2
     expect( TypeError, feat.counter_value, 5, match = 'expected Counter, got int' )
     expect( TypeError, feat.counter_value, feat.Tracked() )
     expect( TypeError, type, 'Sub', ( feat.Counter, ), {} )
@@ -177,7 +173,7 @@ def check_classes():
     expect( TypeError, copy.deepcopy, c )
     expect( TypeError, pickle.dumps, c )
     c.__init__( 100 )
-    assert c.value == 100
+    assert c.value() == 100
     #Objects are deleted with the Python objects:
     n0 = feat.ninstances()
     objs = [ feat.Tracked() for i in range( 10 ) ]
@@ -185,30 +181,29 @@ def check_classes():
     del objs
     gc.collect()
     assert feat.ninstances() == n0
-    #Multiple inheritance (methods from both base classes):
-    d = feat.Derived()
-    assert d.basevalue() == 100 and d.othervalue() == 200
+    #Classes without constructor:
     expect( TypeError, feat.NoInit, match = 'can not be created directly' )
-    expect( TypeError, feat.Counter.increment, feat.Tracked() )
+    assert feat.make_noinit().value() == 5
+    expect( TypeError, feat.Counter.increment, feat.Tracked(), 1 )
     import inspect
-    assert str( inspect.signature( feat.Counter.increment ) ) == '(self, n: int = 1) -> int'
+    assert str( inspect.signature( feat.Counter.increment ) ) == '(self, n: int) -> int'
+    assert str( inspect.signature( feat.Counter.__init__ ) ) == '(self, start: int) -> None'
 
 def bad_callback( x ):
     raise KeyError( 'inside callback' )
 
 def check_callbacks():
-    assert abs( feat.integrate( lambda x : x * x ) - 1 / 3 ) < 1e-6
+    assert abs( feat.integrate( lambda x : x * x, 1000 ) - 1 / 3 ) < 1e-6
     assert feat.integrate( lambda x : 1, n = 10 ) == 1.0
-    assert feat.integrate( lambda x : True if False else 2, n = 1 ) == 2.0
-    e = expect( KeyError, feat.integrate, bad_callback )
+    assert feat.integrate( lambda x : True if False else 2, 1 ) == 2.0
+    e = expect( KeyError, feat.integrate, bad_callback, 10 )
     tb = ''.join( traceback.format_exception( type( e ), e, e.__traceback__ ) )
     assert 'bad_callback' in tb and 'inside callback' in tb
-    expect( TypeError, feat.integrate, lambda x : 'abc', match = 'expected float, got str' )
-    expect( TypeError, feat.integrate, 5, match = 'expected callable' )
-    expect( SystemExit, feat.integrate, lambda x : sys.exit( 3 ) )
+    expect( TypeError, feat.integrate, lambda x : 'abc', 10, match = 'expected float, got str' )
+    expect( TypeError, feat.integrate, 5, 10, match = 'expected callable' )
+    expect( SystemExit, feat.integrate, lambda x : sys.exit( 3 ), 10 )
     assert feat.cbstr( lambda s, n : s * n ) == 'xxx!'
-    assert feat.cbargs( lambda *a : repr( a ) ) == repr( ( 2**64 - 1, -3, 0.25, True, 'cstr', 'view',
-                                                           ( 5, 'tuple' ) ) )
+    assert feat.cbargs( lambda *a : repr( a ) ) == repr( ( 2**64 - 1, -3, 0.25, True, 'cstr', ( 5, 'tuple' ) ) )
     assert feat.cbtup( lambda t : ( t[0] * 2, str( t[1] ) ) ) == ( 14, '0.5' )
     expect( TypeError, feat.cbtup, lambda t : ( 1, 2 ) )
     expect( TypeError, feat.cbtup, lambda t : ( 1, ) )
@@ -239,7 +234,7 @@ def check_callbacks():
     def inner( x ):
         return feat.integrate( lambda y : x * y, n = 10 )
     assert abs( feat.integrate( inner, n = 10 ) - 0.25 ) < 1e-12
-    e = expect( KeyError, feat.integrate, lambda x : feat.integrate( bad_callback ) )
+    e = expect( KeyError, feat.integrate, lambda x : feat.integrate( bad_callback, 10 ), 10 )
     assert 'inside callback' in str( e )
     #Several threads (the GIL is released during calls):
     res = {}
@@ -247,7 +242,7 @@ def check_callbacks():
     def work( i ):
         try:
             res[i] = feat.integrate( lambda x : x * i, n = 2000 )
-            expect( KeyError, feat.integrate, bad_callback )
+            expect( KeyError, feat.integrate, bad_callback, 10 )
         except BaseException as e:
             errors.append( e )
     threads = [ threading.Thread( target = work, args = ( i, ) ) for i in range( 8 ) ]
