@@ -41,6 +41,9 @@ class TargetBinaryObject(target_base.Target):
         self.__pklfile=dirs.pkg_cache_dir(pkg,'objs',subdir,fn+'_deps.pkl')
         self.deps=[dirs.makefile_blddir(self.__pklfile)]
         self.deps+=['${LANG}/%s'%lang,'%s__prepinc'%pkg.name,sf]#FIXME perhaps on /cxxpch in case of cxx? (if has pch reqs)
+        if subdir.startswith('pymod_'):
+            #Needs the installed sbldpy header:
+            self.deps.append(conf.sbldpy_global_target)
         extra_flags=['-I%s'%dirs.makefile_pkg_cache_dir(pkg,'inc'),'-DPACKAGE_NAME=%s'%pkg.name]
 
         if cflags:
@@ -221,6 +224,14 @@ class TargetBinary(target_base.Target):
             #file with the same name in a directory belonging to the package:
             self.code += [ 'mkdir -p ${INST}/%s'%ownerdir,
                            'touch ${INST}/%s/%s'%(ownerdir,filename) ]
+        if subdir.startswith('pymod_'):
+            #Generate the Python file of the sbldpy module, and (unless
+            #disabled) load the module to check it and generate type stubs:
+            self.deps.append(conf.sbldpy_global_target)
+            modname = subdir[6:]
+            self.code.append( '${PYTHON} -m%s.sbldpy_install ${INST}/python/sbldpy.py %s %s.%s %s %s'%(
+                __name__.split('.')[0], join(d,filename), pkg.name, modname,
+                join(d,modname+'.py'), join(d,modname+'.pyi') ) )
 
     def setup(self,pkg):
         ll=[]
